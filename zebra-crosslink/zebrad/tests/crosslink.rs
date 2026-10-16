@@ -8,8 +8,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use zcash_keys::address::Address;
 use zebra_chain::{
     block::{
-        merkle, Block, BftBlock, BftBlockAndFatPointerToIt, ChainHistoryBlockTxAuthCommitmentHash,
-        FatPointerSignature, FatPointerToBftBlock, PROTOTYPE_PARAMETERS, PubKeyID,
+        fat_pointer_digest, merkle, Block, BftBlock, BftBlockAndFatPointerToIt,
+        ChainHistoryBlockTxAuthCommitmentHash, FatPointerSignature, FatPointerToBftBlock,
+        PROTOTYPE_PARAMETERS, PubKeyID,
         Hash as BlockHash, Header as BlockHeader, Height as BlockHeight,
     },
     fmt::HexDebug,
@@ -913,14 +914,7 @@ fn crosslink_reject_fat_pointer_below_bootstrap_activation() {
 
     // Height 5 points at that BFT block, far below the prototype's activation height.
     pow.push(gen.next_block(&miner_addr));
-    gen.tip = Arc::new(Block {
-        header: Arc::new(BlockHeader {
-            version: 5,
-            fat_pointer_to_bft_block,
-            ..*gen.tip.header
-        }),
-        ..gen.tip.as_ref().clone()
-    });
+    gen.retarget_tip(Some(5), fat_pointer_to_bft_block);
     tf.push_instr_load_pow(&gen.tip, SHOULD_FAIL);
     tf.push_instr_expect_pow_chain_length(5, 0);
 
@@ -966,26 +960,64 @@ fn crosslink_test_pow_to_pos_link() {
     };
 
     pow.push(gen.next_block(&miner_addr));
-    gen.tip = Arc::new(Block {
-        header: Arc::new(BlockHeader {
-            version: 5,
-            fat_pointer_to_bft_block: fat_pointer_to_bft_block.clone(),
-            ..*gen.tip.header
-        }),
-        ..gen.tip.as_ref().clone()
-    });
+    gen.retarget_tip(Some(5), fat_pointer_to_bft_block.clone());
     tf.push_instr_load_pow(&gen.tip, 0);
 
     pow.push(gen.next_block(&miner_addr));
-    gen.tip = Arc::new(Block {
-        header: Arc::new(BlockHeader {
-            version: 5,
-            fat_pointer_to_bft_block,
-            ..*gen.tip.header
-        }),
-        ..gen.tip.as_ref().clone()
-    });
+    gen.retarget_tip(Some(5), fat_pointer_to_bft_block);
     tf.push_instr_load_pow(&gen.tip, 0);
+
+    test_bytes(tf.write_to_bytes());
+}
+
+/// The fat pointer is bound into `hashBlockCommitments`, which is inside the Equihash input.
+/// An honest citation of a decided BFT block is accepted. The same header with the pointer's
+/// height byte, its signature list, or the BFT block it names changed, and the commitment left
+/// as it was, is not: those bytes used to be a free `sha256d` grind.
+#[test]
+fn crosslink_reject_pow_block_whose_commitment_does_not_bind_its_fat_pointer() {
+    set_test_name(function_name!());
+    let mut tf = TF::new(&HARNESS_PARAMETERS);
+    let (mut gen, miner_addr, pow) = pow_chain_for(&mut tf, 6);
+
+    let (pos_h, fat_ptr) = (&mut 0, &mut FatPointerToBftBlock::null());
+    // Heights 2..=4, snapshot height 1. Heights 3..=5, snapshot height 2.
+    // Both are admissible on a block at height 7.
+    let bft0 = next_pos(pos_h, fat_ptr, &pow[1..4], &[]);
+    tf.push_instr_load_pos(&bft0, 0);
+    let bft1 = next_pos(pos_h, fat_ptr, &pow[2..5], &[]);
+    tf.push_instr_load_pos(&bft1, 0);
+
+    gen.next_block(&miner_addr);
+    let honest = gen.retarget_tip(None, bft1.0.fat_ptr.clone());
+    tf.push_instr_load_pow(&honest, 0);
+    tf.push_instr_expect_pow_chain_length(8, 0);
+
+    let with_pointer = |block: &Block, pointer: FatPointerToBftBlock| {
+        Arc::new(Block {
+            header: Arc::new(BlockHeader {
+                fat_pointer_to_bft_block: pointer,
+                ..*block.header
+            }),
+            transactions: block.transactions.clone(),
+        })
+    };
+
+    let mut height_byte = bft1.0.fat_ptr.clone();
+    height_byte.vote_for_block_without_finalizer_public_key[32] ^= 0x01;
+    tf.push_instr_load_pow(&with_pointer(&honest, height_byte), SHOULD_FAIL);
+    tf.push_instr_expect_pow_chain_length(8, 0);
+
+    let mut signatures = bft1.0.fat_ptr.clone();
+    signatures.signatures.push(FatPointerSignature {
+        pub_key: PubKeyID([7u8; 32]),
+        vote_signature: [9u8; 64],
+    });
+    tf.push_instr_load_pow(&with_pointer(&honest, signatures), SHOULD_FAIL);
+    tf.push_instr_expect_pow_chain_length(8, 0);
+
+    tf.push_instr_load_pow(&with_pointer(&honest, bft0.0.fat_ptr.clone()), SHOULD_FAIL);
+    tf.push_instr_expect_pow_chain_length(8, 0);
 
     test_bytes(tf.write_to_bytes());
 }
@@ -1142,15 +1174,7 @@ fn crosslink_pow_follows_the_heaviest_chain_until_fin_moves_to_the_decided_branc
         tf.push_instr_load_pow(&genb.tip, 0);
     }
     genb.next_block(&miner_addr2);
-    genb.tip = Arc::new(Block {
-        header: Arc::new(BlockHeader {
-            version: 5,
-            fat_pointer_to_bft_block,
-            ..*genb.tip.header
-        }),
-        ..genb.tip.as_ref().clone()
-    });
-    pow.push(genb.tip.clone());
+    pow.push(genb.retarget_tip(Some(5), fat_pointer_to_bft_block));
     tf.push_instr_load_pow(&genb.tip, 0);
 
     // Branch B is now the best chain and its tip cites the decision, so `fin` reaches pow[9].
@@ -1230,14 +1254,7 @@ fn crosslink_reject_pow_block_citing_a_snapshot_off_its_own_chain() {
     // Branch A's height 14 cites a bft-block whose snapshot is branch B's height 10. It is σ + 1
     // above that snapshot, so only Last Final Snapshot can refuse it.
     gen.next_block(&miner_addr);
-    gen.tip = Arc::new(Block {
-        header: Arc::new(BlockHeader {
-            version: 5,
-            fat_pointer_to_bft_block,
-            ..*gen.tip.header
-        }),
-        ..gen.tip.as_ref().clone()
-    });
+    gen.retarget_tip(Some(5), fat_pointer_to_bft_block);
     tf.push_instr_load_pow(&gen.tip, SHOULD_FAIL);
     tf.push_instr_expect_pow_chain_length(14, 0);
 
@@ -1424,31 +1441,13 @@ impl BlockGen {
         // Both roots must cover *every* transaction in the block, not just the coinbase.
         let merkle_root: merkle::Root = transactions.iter().collect();
 
-        // Mirrors the consensus dispatch (state service
-        // check::block_commitment_is_valid_for_chain_history): the Heartwood activation
-        // block carries the reserved all-zero commitment, Heartwood/Canopy carry the raw
-        // history MMR root, and NU5 onward carries the ZIP-244 hashBlockCommitments,
-        // which also commits to the auth data of every transaction.
-        let commitment_bytes: [u8; 32] =
-            if NetworkUpgrade::Heartwood.activation_height(network) == Some(height) {
-                [0u8; 32]
-            } else {
-                match NetworkUpgrade::current(network, height) {
-                    NetworkUpgrade::Heartwood | NetworkUpgrade::Canopy => {
-                        <[u8; 32]>::from(history_tree.hash().unwrap_or([0u8; 32].into()))
-                    }
-                    _ => {
-                        let auth_data_root: merkle::AuthDataRoot = transactions.iter().collect();
-                        ChainHistoryBlockTxAuthCommitmentHash::from_commitments(
-                            &history_tree
-                                .hash()
-                                .expect("history tree is non-empty after the Heartwood activation block"),
-                            &auth_data_root,
-                        )
-                        .bytes_in_serialized_order()
-                    }
-                }
-            };
+        let commitment_bytes = Self::header_commitment_bytes(
+            network,
+            height,
+            history_tree,
+            &transactions,
+            &FatPointerToBftBlock::null(),
+        );
 
         Arc::new(Block {
             header: Arc::new(BlockHeader {
@@ -1465,6 +1464,78 @@ impl BlockGen {
 
             transactions,
         })
+    }
+
+    /// The header commitment for a block at `height`, over `history_tree` (the
+    /// tree up to and including the parent) and `transactions`.
+    ///
+    /// NU5 onward mixes [`fat_pointer_digest`] into the ZIP 244 terminator, so
+    /// the bytes depend on `fat_pointer`. Earlier commitments cannot bind a
+    /// pointer; the Heartwood activation block stays the reserved zeros.
+    fn header_commitment_bytes(
+        network: &Network,
+        height: BlockHeight,
+        history_tree: &HistoryTree,
+        transactions: &[Arc<Transaction>],
+        fat_pointer: &FatPointerToBftBlock,
+    ) -> [u8; 32] {
+        // Mirrors the consensus dispatch (state service
+        // check::block_commitment_is_valid_for_chain_history): the Heartwood activation
+        // block carries the reserved all-zero commitment, Heartwood/Canopy carry the raw
+        // history MMR root, and NU5 onward carries the ZIP-244 hashBlockCommitments,
+        // which also commits to the auth data of every transaction and to the fat pointer.
+        if NetworkUpgrade::Heartwood.activation_height(network) == Some(height) {
+            [0u8; 32]
+        } else {
+            match NetworkUpgrade::current(network, height) {
+                NetworkUpgrade::Heartwood | NetworkUpgrade::Canopy => {
+                    <[u8; 32]>::from(history_tree.hash().unwrap_or([0u8; 32].into()))
+                }
+                _ => {
+                    let auth_data_root: merkle::AuthDataRoot = transactions.iter().collect();
+                    ChainHistoryBlockTxAuthCommitmentHash::from_commitments(
+                        &history_tree.hash().expect(
+                            "history tree is non-empty after the Heartwood activation block",
+                        ),
+                        &auth_data_root,
+                        &fat_pointer_digest(fat_pointer),
+                    )
+                    .bytes_in_serialized_order()
+                }
+            }
+        }
+    }
+
+    /// Replace the tip's fat pointer and recompute `commitment_bytes` so the
+    /// new pointer is inside the Equihash input. `version` replaces the header
+    /// version when set.
+    fn retarget_tip(
+        &mut self,
+        version: Option<u32>,
+        fat_pointer: FatPointerToBftBlock,
+    ) -> Arc<Block> {
+        let height = self
+            .tip
+            .coinbase_height()
+            .expect("generated blocks have a height");
+        let commitment_bytes = Self::header_commitment_bytes(
+            &self.network,
+            height,
+            &self.history_tree,
+            &self.tip.transactions,
+            &fat_pointer,
+        );
+        let version = version.unwrap_or(self.tip.header.version);
+        self.tip = Arc::new(Block {
+            header: Arc::new(BlockHeader {
+                version,
+                commitment_bytes: HexDebug(commitment_bytes),
+                fat_pointer_to_bft_block: fat_pointer,
+                ..*self.tip.header
+            }),
+            ..self.tip.as_ref().clone()
+        });
+        self.tip.clone()
     }
 
     pub fn next_block(&mut self, miner_addr: &Address) -> Arc<zebra_chain::block::Block> {
@@ -2499,18 +2570,11 @@ fn diagram_scene_path(name: &str) -> PathBuf {
 }
 
 /// Re-stamps the generator's tip with a BFT pointer, giving that block a `context_bft`.
-/// Only the header's fat pointer changes, so the merkle root and the commitment still
-/// match the transaction list. The block hash does change, which is why this has to happen
-/// before the next block is generated from this one.
+/// The merkle root still matches the transaction list. `commitment_bytes` is recomputed
+/// so the pointer is bound into the Equihash input. The block hash does change, which
+/// is why this has to happen before the next block is generated from this one.
 fn point_tip_at_bft(gen: &mut BlockGen, fat_ptr: &FatPointerToBftBlock) -> Arc<Block> {
-    gen.tip = Arc::new(Block {
-        header: Arc::new(BlockHeader {
-            fat_pointer_to_bft_block: fat_ptr.clone(),
-            ..*gen.tip.header
-        }),
-        ..gen.tip.as_ref().clone()
-    });
-    gen.tip.clone()
+    gen.retarget_tip(None, fat_ptr.clone())
 }
 
 /// A second valid transparent P2PKH miner, so a competing branch has different coinbases

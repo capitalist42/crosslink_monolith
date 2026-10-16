@@ -153,6 +153,8 @@ async fn trusted_chain_sync_handles_forks_correctly() -> Result<()> {
         let height = block.coinbase_height().unwrap();
         let auth_root = block.auth_data_root();
         let hist_root = chain_info.chain_history_root.unwrap_or_default();
+        let pointer_digest =
+            zebra_chain::block::fat_pointer_digest(&block.header.fat_pointer_to_bft_block);
         let header = Arc::make_mut(&mut block.header);
 
         header.commitment_bytes = match NetworkUpgrade::current(&net, height) {
@@ -162,15 +164,19 @@ async fn trusted_chain_sync_handles_forks_correctly() -> Result<()> {
             | NetworkUpgrade::Nu6_1
             | NetworkUpgrade::Nu6_2
             | NetworkUpgrade::Nu6_3
-            | NetworkUpgrade::Nu7 => {
-                ChainHistoryBlockTxAuthCommitmentHash::from_commitments(&hist_root, &auth_root)
-                    .bytes_in_serialized_order()
-            }
+            | NetworkUpgrade::Nu7 => ChainHistoryBlockTxAuthCommitmentHash::from_commitments(
+                &hist_root,
+                &auth_root,
+                &pointer_digest,
+            )
+            .bytes_in_serialized_order(),
             #[cfg(zcash_unstable = "zfuture")]
-            NetworkUpgrade::ZFuture => {
-                ChainHistoryBlockTxAuthCommitmentHash::from_commitments(&hist_root, &auth_root)
-                    .bytes_in_serialized_order()
-            }
+            NetworkUpgrade::ZFuture => ChainHistoryBlockTxAuthCommitmentHash::from_commitments(
+                &hist_root,
+                &auth_root,
+                &pointer_digest,
+            )
+            .bytes_in_serialized_order(),
             NetworkUpgrade::Genesis
             | NetworkUpgrade::BeforeOverwinter
             | NetworkUpgrade::Overwinter

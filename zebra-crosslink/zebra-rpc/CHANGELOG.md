@@ -9,12 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- `DefaultRoots::from_coinbase` takes the template's fat pointer, and
+  `blockcommitmentshash` covers that pointer.
 - The `Rpc` trait has a new required `get_deprecation_info` method. Downstream implementers of
   the trait must add it; callers of `RpcImpl` are unaffected
   ([#11097](https://github.com/ZcashFoundation/zebra/pull/11097)).
 
 ### Added
 
+- `getblocktemplate` `defaultroots` includes `fatpointerdigest`, the ZIP 244
+  terminator a pool mixes in when it recomputes `hashBlockCommitments`. A null
+  fat pointer digests to 32 zero bytes.
 - New `getdeprecationinfo` RPC method and `GetDeprecationInfoResponse` type. The reported end of
   support height is set with `RpcImpl::with_end_of_support_height`; without it the response omits
   the `end_of_service` object ([#11097](https://github.com/ZcashFoundation/zebra/pull/11097)).

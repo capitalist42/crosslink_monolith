@@ -5,7 +5,10 @@ use std::{borrow::Borrow, sync::Arc};
 use chrono::Duration;
 
 use zebra_chain::{
-    block::{self, Block, ChainHistoryBlockTxAuthCommitmentHash, CommitmentError},
+    block::{
+        self, fat_pointer_digest, Block, ChainHistoryBlockTxAuthCommitmentHash, CommitmentError,
+        FatPointerToBftBlock,
+    },
     history_tree::HistoryTree,
     parameters::{Network, NetworkUpgrade},
     work::difficulty::CompactDifficulty,
@@ -155,7 +158,9 @@ pub(crate) fn block_commitment_is_valid_for_chain_history(
             //
             // We don't need to validate this rule since we checkpoint on Canopy.
             //
-            // We also don't need to do anything in the other cases.
+            // These commitments have no terminator, so they cannot bind a fat
+            // pointer. A non-null pointer here would sit outside the Equihash input.
+            reject_unbound_fat_pointer(&block)?;
             Ok(())
         }
         block::Commitment::ChainHistoryRoot(actual_history_tree_root) => {
@@ -168,6 +173,9 @@ pub(crate) fn block_commitment_is_valid_for_chain_history(
             //
             // The network is checked by [`Block::commitment`] above; it will only
             // return the chain history root if it's Heartwood or Canopy.
+            //
+            // The chain history root does not cover the fat pointer.
+            reject_unbound_fat_pointer(&block)?;
             let history_tree_root = history_tree
                 .hash()
                 .expect("the history tree of the previous block must exist since the current block has a ChainHistoryRoot");
@@ -202,10 +210,12 @@ pub(crate) fn block_commitment_is_valid_for_chain_history(
                  since the current block has a ChainHistoryBlockTxAuthCommitment",
                 );
             let auth_data_root = block.auth_data_root();
+            let pointer_digest = fat_pointer_digest(&block.header.fat_pointer_to_bft_block);
 
             let hash_block_commitments = ChainHistoryBlockTxAuthCommitmentHash::from_commitments(
                 &history_tree_root,
                 &auth_data_root,
+                &pointer_digest,
             );
 
             if actual_hash_block_commitments == hash_block_commitments {
@@ -219,6 +229,17 @@ pub(crate) fn block_commitment_is_valid_for_chain_history(
                 ))
             }
         }
+    }
+}
+
+/// Reject a non-null fat pointer on a commitment that has nowhere to bind it.
+fn reject_unbound_fat_pointer(block: &Block) -> Result<(), ValidateContextError> {
+    if block.header.fat_pointer_to_bft_block == FatPointerToBftBlock::null() {
+        Ok(())
+    } else {
+        Err(ValidateContextError::InvalidBlockCommitment(
+            CommitmentError::NonNullFatPointerBeforeBlockCommitments,
+        ))
     }
 }
 

@@ -518,10 +518,13 @@ impl Block {
                             if nu5_height.is_some() && current_height >= nu5_height.unwrap() {
                                 // From zebra-state/src/service/check.rs
                                 let auth_data_root = block.auth_data_root();
+                                let pointer_digest =
+                                    fat_pointer_digest(&block.header.fat_pointer_to_bft_block);
                                 let hash_block_commitments =
                                     ChainHistoryBlockTxAuthCommitmentHash::from_commitments(
                                         &history_tree_root,
                                         &auth_data_root,
+                                        &pointer_digest,
                                     );
                                 let block_header = Arc::make_mut(&mut block.header);
                                 block_header.commitment_bytes =

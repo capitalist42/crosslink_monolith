@@ -7,9 +7,10 @@ use derive_new::new;
 use zebra_chain::{
     amount::NegativeOrZero,
     block::{
-        self,
+        self, fat_pointer_digest,
         merkle::{self, AuthDataRoot, AUTH_DIGEST_PLACEHOLDER},
-        ChainHistoryBlockTxAuthCommitmentHash, ChainHistoryMmrRootHash, Height,
+        ChainHistoryBlockTxAuthCommitmentHash, ChainHistoryMmrRootHash, FatPointerToBftBlock,
+        Height,
     },
     parameters::{Network, NetworkUpgrade},
     transaction::VerifiedUnminedTx,
@@ -44,13 +45,26 @@ pub struct DefaultRoots {
     pub(crate) auth_data_root: AuthDataRoot,
 
     /// The block commitment for the new block's header.
-    /// This hash covers `chain_history_root` and `auth_data_root`.
+    /// This hash covers `chain_history_root`, `auth_data_root`, and
+    /// [`fat_pointer_digest`].
     ///
     /// `merkle_root` has its own field in the block header.
     #[serde(rename = "blockcommitmentshash")]
     #[serde(with = "hex")]
     #[getter(copy)]
     pub(crate) block_commitments_hash: ChainHistoryBlockTxAuthCommitmentHash,
+
+    /// Digest of the template's fat pointer, in the byte order
+    /// [`ChainHistoryBlockTxAuthCommitmentHash::from_commitments`] consumes.
+    ///
+    /// A pool that re-selects transactions and recomputes `hashBlockCommitments`
+    /// mixes this in as the ZIP 244 terminator. A null pointer digests to 32
+    /// zero bytes, which is the upstream terminator.
+    #[serde(rename = "fatpointerdigest")]
+    #[serde(with = "hex")]
+    #[serde(default)]
+    #[getter(copy)]
+    pub(crate) fat_pointer_digest: [u8; 32],
 }
 
 impl DefaultRoots {
@@ -61,6 +75,7 @@ impl DefaultRoots {
         coinbase: &TransactionTemplate<NegativeOrZero>,
         chain_history_root: Option<ChainHistoryMmrRootHash>,
         mempool_txs: &[VerifiedUnminedTx],
+        fat_pointer: &FatPointerToBftBlock,
     ) -> Self {
         let chain_history_root = chain_history_root
             .or_else(|| {
@@ -82,6 +97,7 @@ impl DefaultRoots {
             }))
             .collect();
 
+        let pointer_digest = fat_pointer_digest(fat_pointer);
         Self {
             merkle_root: iter::once(coinbase.hash)
                 .chain(mempool_txs.iter().map(|tx| tx.transaction.id.mined_id()))
@@ -96,6 +112,8 @@ impl DefaultRoots {
             // (`Commitment::from_bytes`) expects the reserved all-zero value at the Heartwood
             // activation height regardless of which upgrade is current, so the miner would build
             // blocks its own node rejects with `InvalidChainHistoryActivationReserved`.
+            // That reserved value cannot bind a pointer, so a template at this height is only
+            // valid with a null pointer (digest of 32 zero bytes).
             block_commitments_hash: if Some(height)
                 == NetworkUpgrade::Heartwood.activation_height(net)
                 && chain_history_root == block::CHAIN_HISTORY_ACTIVATION_RESERVED.into()
@@ -105,8 +123,10 @@ impl DefaultRoots {
                 ChainHistoryBlockTxAuthCommitmentHash::from_commitments(
                     &chain_history_root,
                     &auth_data_root,
+                    &pointer_digest,
                 )
             },
+            fat_pointer_digest: pointer_digest,
         }
     }
 }

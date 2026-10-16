@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- A block commitment that does not bind the header's fat pointer is rejected.
+  Pre-NU5 commitments reject a non-null pointer, because they have no
+  terminator to bind it.
+
 ### Fixed
 
 - `init_read_only()` now returns `StateInitError::ReadOnlyEphemeralConflict` for a config with

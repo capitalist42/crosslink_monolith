@@ -7,14 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `hashBlockCommitments` binds `fat_pointer_to_bft_block`. A null pointer still
+  digests to the ZIP 244 terminator of 32 zero bytes, so blocks with a null
+  pointer keep their previous commitment. A non-null pointer is part of the
+  Equihash input, and a non-null pointer on a pre-NU5 commitment is rejected.
+
 ### Breaking Changes
 
+- `ChainHistoryBlockTxAuthCommitmentHash::from_commitments` takes the fat-pointer
+  digest as a third argument. Pass `&[0u8; 32]`, or [`block::fat_pointer_digest`]
+  of a null pointer, to reproduce the previous value
 - Added the `ValueBalanceError::Total` variant returned when the sum of value
   pools is out of range
   ([#10817](https://github.com/ZcashFoundation/zebra/pull/10817))
 
 ### Added
 
+- `block::fat_pointer_digest`
 - `ValueBalance::total`, which returns the sum of all value pool balances
 
 ### Fixed
